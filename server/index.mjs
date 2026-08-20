@@ -84,6 +84,8 @@ const routes = [
   ['GET', /^\/api\/agents\/([^/]+)\/sessions$/, async (m) => ({ sessions: store.listSessions(m[1]) })],
   ['GET', /^\/api\/agents\/([^/]+)\/events$/, async (m) => ({ events: store.listEvents(m[1]) })],
 
+  ['GET', /^\/api\/usage$/, async () => manager.usageWindow()],
+
   ['POST', /^\/api\/validate-path$/, async (_m, body) => {
     const dir = String(body?.path ?? '');
     const exists = Boolean(dir) && fs.existsSync(dir) && fs.statSync(dir).isDirectory();
@@ -173,7 +175,12 @@ wss.on('connection', (ws) => {
     ws.isAlive = true;
   });
 
-  push(ws, { t: 'hello', agents: store.listAgents(), statuses: manager.statuses() });
+  push(ws, {
+    t: 'hello',
+    agents: store.listAgents(),
+    statuses: manager.statuses(),
+    usage: manager.usageWindow(),
+  });
 
   ws.on('message', async (raw) => {
     let msg;
@@ -239,6 +246,9 @@ async function handleClientMessage(ws, msg) {
     case 'interrupt':
       manager.interrupt(msg.agentId);
       return;
+    case 'usage':
+      push(ws, { t: 'usage', usage: manager.usageWindow() });
+      return;
     case 'agents':
       push(ws, { t: 'agents', agents: store.listAgents(), statuses: manager.statuses() });
       return;
@@ -269,6 +279,9 @@ manager.on('status', (status) => broadcast({ t: 'status', status }));
 manager.on('delta', ({ agentId, text }) => broadcast({ t: 'delta', agentId, text }));
 manager.on('delta-end', ({ agentId }) => broadcast({ t: 'delta-end', agentId }));
 manager.on('notify', ({ agentId, reason }) => broadcast({ t: 'notify', agentId, reason }));
+// Usage + rate limit are account-wide, so every client gets the same snapshot.
+manager.on('usage', () => broadcast({ t: 'usage', usage: manager.usageWindow() }));
+manager.on('ratelimit', ({ info }) => broadcast({ t: 'ratelimit', info, usage: manager.usageWindow() }));
 
 /* ------------------------------- boot -------------------------------- */
 

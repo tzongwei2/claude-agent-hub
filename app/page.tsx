@@ -7,6 +7,7 @@ import { Chat } from '@/components/Chat';
 import { Sidebar } from '@/components/Sidebar';
 import { AgentDialog } from '@/components/AgentDialog';
 import { Icon, cx } from '@/components/ui';
+import { RateLimitBanner } from '@/components/UsageMeter';
 
 const EMPTY_STATUS: StatusSnapshot = {
   agentId: '',
@@ -21,8 +22,14 @@ export default function Page() {
   const [dialog, setDialog] = useState<{ open: boolean; agent: Agent | null }>({ open: false, agent: null });
   const [filter, setFilter] = useState<'all' | 'running'>('all');
   const [dark, setDark] = useState(false);
+  // Optional, user-supplied token ceiling. Nothing invents this number.
+  const [budget, setBudget] = useState<number | null>(null);
 
-  useEffect(() => setDark(document.documentElement.classList.contains('dark')), []);
+  useEffect(() => {
+    setDark(document.documentElement.classList.contains('dark'));
+    const saved = Number(localStorage.tokenBudget ?? 0);
+    if (saved > 0) setBudget(saved);
+  }, []);
 
   const toggleTheme = () => {
     const next = !dark;
@@ -57,8 +64,9 @@ export default function Page() {
   const alerts = Object.values(hub.statuses).filter((s) => s.status === 'waiting_for_permission').length;
 
   return (
-    <main className="flex h-screen w-screen items-stretch p-3 sm:p-5">
-      <div className="flex w-full overflow-hidden rounded-[26px] bg-[var(--shell)] shadow-[var(--shadow)]">
+    <main className="flex h-screen w-screen flex-col items-stretch p-3 sm:p-5">
+      <RateLimitBanner usage={hub.usage} />
+      <div className="flex w-full flex-1 overflow-hidden rounded-[26px] bg-[var(--shell)] shadow-[var(--shadow)]">
         {/* ---------------- icon rail ---------------- */}
         <nav className="flex w-[86px] shrink-0 flex-col items-center gap-2 bg-[var(--rail)] py-5">
           <div className="mb-3 grid h-11 w-11 place-items-center rounded-2xl bg-white/10 text-white">
@@ -105,6 +113,8 @@ export default function Page() {
           onSelect={select}
           onCreate={() => setDialog({ open: true, agent: null })}
           filter={filter}
+          usage={hub.usage}
+          budget={budget}
         />
 
         {/* ---------------- chat ---------------- */}

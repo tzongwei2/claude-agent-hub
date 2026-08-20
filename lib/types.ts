@@ -78,3 +78,27 @@ export const STATUS_META: Record<AgentStatus, { label: string; color: string }> 
   error: { label: 'Error', color: 'var(--danger)' },
   stopped: { label: 'Stopped', color: 'var(--text-soft)' },
 };
+
+export interface RateLimitInfo {
+  status: string;
+  resetsAt?: number;
+  rateLimitType?: string;
+  overageStatus?: string;
+  isUsingOverage?: boolean;
+}
+
+export interface UsageWindow {
+  since: number;
+  tokens: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreate: number;
+  cost: number;
+  turns: number;
+  byAgent: { agentId: string; name: string; tokens: number; cost: number; turns: number }[];
+  windowMs: number;
+  windowType: string;
+  resetsAt: number | null;
+  rateLimit: RateLimitInfo | null;
+}

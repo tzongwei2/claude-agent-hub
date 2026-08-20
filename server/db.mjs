@@ -72,6 +72,21 @@ export function openDb(file = DB_PATH) {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS events_agent ON events(agent_id, id);
+
+    -- One row per completed turn. Kept separate from events so the rolling
+    -- usage window survives event pruning, and stays tiny (~60 bytes/turn).
+    CREATE TABLE IF NOT EXISTS usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      session_id TEXT,
+      input_tokens INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      cache_read_tokens INTEGER DEFAULT 0,
+      cache_creation_tokens INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS usage_time ON usage(created_at);
   `);
 
   return db;
@@ -223,6 +238,8 @@ export function createStore(db) {
       for (const { id } of db.prepare('SELECT id FROM agents').all()) {
         removed += store.pruneEvents(id) + store.pruneSessions(id);
       }
+      // The window is hours; a week of history is plenty for trend context.
+      removed += store.pruneUsage(Date.now() - 7 * 24 * 60 * 60 * 1000);
       db.pragma('wal_checkpoint(TRUNCATE)');
       const free = db.pragma('freelist_count', { simple: true });
       if (free > 1000) db.exec('VACUUM');
@@ -237,6 +254,67 @@ export function createStore(db) {
     listEvents(agentId, limit = 400) {
       const rows = db.prepare('SELECT * FROM events WHERE agent_id = ? ORDER BY id DESC LIMIT ?').all(agentId, limit);
       return rows.reverse().map((r) => ({ ...JSON.parse(r.payload), id: r.id, ts: r.created_at }));
+    },
+
+    /* ---- usage (the trip meter) ---- */
+
+    recordUsage(agentId, sessionId, usage = {}, costUsd = 0) {
+      const row = {
+        agentId,
+        sessionId,
+        input: usage.input_tokens ?? 0,
+        output: usage.output_tokens ?? 0,
+        cacheRead: usage.cache_read_input_tokens ?? 0,
+        cacheCreate: usage.cache_creation_input_tokens ?? 0,
+        cost: costUsd ?? 0,
+        ts: now(),
+      };
+      db.prepare(
+        `INSERT INTO usage (agent_id,session_id,input_tokens,output_tokens,
+           cache_read_tokens,cache_creation_tokens,cost_usd,created_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      ).run(row.agentId, row.sessionId, row.input, row.output, row.cacheRead, row.cacheCreate, row.cost, row.ts);
+      return row;
+    },
+
+    /**
+     * Totals for the current rate-limit window, plus a per-agent breakdown so
+     * you can see which agent is burning it. All computed locally from data
+     * Claude Code already reports - no API call, no tokens.
+     */
+    usageSince(sinceTs) {
+      const totals = db
+        .prepare(
+          `SELECT COALESCE(SUM(input_tokens),0) input,
+                  COALESCE(SUM(output_tokens),0) output,
+                  COALESCE(SUM(cache_read_tokens),0) cacheRead,
+                  COALESCE(SUM(cache_creation_tokens),0) cacheCreate,
+                  COALESCE(SUM(cost_usd),0) cost,
+                  COUNT(*) turns
+             FROM usage WHERE created_at >= ?`,
+        )
+        .get(sinceTs);
+
+      const byAgent = db
+        .prepare(
+          `SELECT u.agent_id agentId, a.name,
+                  COALESCE(SUM(u.input_tokens + u.output_tokens + u.cache_creation_tokens),0) tokens,
+                  COALESCE(SUM(u.cost_usd),0) cost,
+                  COUNT(*) turns
+             FROM usage u JOIN agents a ON a.id = u.agent_id
+            WHERE u.created_at >= ?
+            GROUP BY u.agent_id ORDER BY tokens DESC`,
+        )
+        .all(sinceTs);
+
+      // Billable-ish total: cache reads are excluded because they are the cheap
+      // part and would swamp the number without reflecting real consumption.
+      const tokens = totals.input + totals.output + totals.cacheCreate;
+      return { since: sinceTs, tokens, ...totals, byAgent };
+    },
+
+    pruneUsage(olderThanTs) {
+      return db.prepare('DELETE FROM usage WHERE created_at < ?').run(olderThanTs).changes;
     },
 
     clearEvents(agentId) {

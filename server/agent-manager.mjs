@@ -49,6 +49,14 @@ import { RETENTION } from './db.mjs';
 
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 
+/** Rate-limit window lengths, used to compute the rolling usage total. */
+export const WINDOW_MS = {
+  five_hour: 5 * 60 * 60 * 1000,
+  seven_day: 7 * 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+};
+export const DEFAULT_WINDOW_MS = WINDOW_MS.five_hour;
+
 export class AgentRunner extends EventEmitter {
   constructor(agent, store) {
     super();
@@ -64,6 +72,7 @@ export class AgentRunner extends EventEmitter {
     this.starting = false;
     this.lastError = null;
     this.currentActivity = null;
+    this.rateLimit = null;
   }
 
   /* ------------------------------------------------------------------ */
@@ -82,6 +91,7 @@ export class AgentRunner extends EventEmitter {
       activity: this.currentActivity,
       claudeSessionId: this.claudeSessionId,
       lastError: this.lastError,
+      rateLimit: this.rateLimit,
       pendingPermissions: [...this.pendingPermissions.values()].map((p) => p.event),
     };
   }
@@ -308,6 +318,8 @@ export class AgentRunner extends EventEmitter {
         return this.handleResult(msg);
       case 'control_request':
         return this.handleControlRequest(msg);
+      case 'rate_limit_event':
+        return this.handleRateLimit(msg);
       default:
         return undefined;
     }
@@ -322,6 +334,31 @@ export class AgentRunner extends EventEmitter {
     }
     if (msg.subtype === 'permission_denied') {
       this.record({ kind: 'system', level: 'warn', text: msg.message ?? 'Permission denied.' });
+    }
+  }
+
+  /**
+   * The warning light. Claude reports its rate-limit state on every turn; we
+   * only surface a change, so a healthy session stays quiet. Nothing here
+   * costs anything - the event arrives whether or not we read it.
+   */
+  handleRateLimit(msg) {
+    const info = msg.rate_limit_info;
+    if (!info) return;
+    const previous = this.rateLimit?.status;
+    this.rateLimit = info;
+
+    if (info.status && info.status !== previous) {
+      this.emit('ratelimit', { agentId: this.agent.id, info });
+      if (previous && info.status !== 'allowed') {
+        this.record({
+          kind: 'system',
+          level: 'warn',
+          text: `Rate limit status changed to "${info.status}" (${info.rateLimitType ?? 'window'}).`,
+        });
+      }
+    } else {
+      this.emit('ratelimit', { agentId: this.agent.id, info });
     }
   }
 
@@ -382,6 +419,11 @@ export class AgentRunner extends EventEmitter {
 
   handleResult(msg) {
     this.emit('delta-end', { agentId: this.agent.id });
+
+    const usage = msg.usage ?? {};
+    const tokens =
+      (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+
     this.record({
       kind: 'result',
       isError: Boolean(msg.is_error),
@@ -389,7 +431,27 @@ export class AgentRunner extends EventEmitter {
       durationMs: msg.duration_ms ?? msg.duration_api_ms ?? null,
       costUsd: msg.total_cost_usd ?? null,
       turns: msg.num_turns ?? null,
+      tokens,
     });
+
+    // The trip meter: one small row per completed turn.
+    this.store.recordUsage(this.agent.id, this.sessionId, usage, msg.total_cost_usd ?? 0);
+    this.emit('usage', { agentId: this.agent.id });
+
+    // The hard stop. A refused turn says so here; make it unmissable rather
+    // than letting it read as a generic failure.
+    const reason = `${msg.subtype ?? ''} ${msg.api_error_status ?? ''} ${msg.result ?? ''}`;
+    if (msg.is_error && /rate.?limit|usage limit|quota|429/i.test(reason)) {
+      const resets = this.rateLimit?.resetsAt
+        ? ` Resets at ${new Date(this.rateLimit.resetsAt * 1000).toLocaleTimeString()}.`
+        : '';
+      this.record({
+        kind: 'error',
+        text: `Rate limit reached - Claude Code refused this turn.${resets}`,
+        rateLimited: true,
+      });
+      this.emit('notify', { agentId: this.agent.id, reason: 'rate_limit' });
+    }
     this.setStatus(this.pendingPermissions.size ? 'waiting_for_permission' : 'idle', null);
     this.emit('notify', { agentId: this.agent.id, reason: msg.is_error ? 'error' : 'done' });
   }
@@ -466,6 +528,22 @@ export class AgentManager extends EventEmitter {
     super();
     this.store = store;
     this.runners = new Map();
+    /** Latest rate-limit info seen from any agent; it is account-wide. */
+    this.rateLimit = null;
+  }
+
+  /** Rolling usage for the current rate-limit window. Computed locally. */
+  usageWindow() {
+    const type = this.rateLimit?.rateLimitType;
+    const windowMs = WINDOW_MS[type] ?? DEFAULT_WINDOW_MS;
+    const snapshot = this.store.usageSince(Date.now() - windowMs);
+    return {
+      ...snapshot,
+      windowMs,
+      windowType: type ?? 'five_hour',
+      resetsAt: this.rateLimit?.resetsAt ? this.rateLimit.resetsAt * 1000 : null,
+      rateLimit: this.rateLimit,
+    };
   }
 
   runner(agentId) {
@@ -479,6 +557,11 @@ export class AgentManager extends EventEmitter {
     runner.on('delta', (d) => this.emit('delta', d));
     runner.on('delta-end', (d) => this.emit('delta-end', d));
     runner.on('notify', (n) => this.emit('notify', n));
+    runner.on('ratelimit', (r) => {
+      this.rateLimit = r.info;
+      this.emit('ratelimit', r);
+    });
+    runner.on('usage', (u) => this.emit('usage', u));
     this.runners.set(agentId, runner);
     return runner;
   }

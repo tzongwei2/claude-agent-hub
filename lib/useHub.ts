@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Agent, HubEvent, StatusSnapshot } from './types';
+import type { Agent, HubEvent, StatusSnapshot, UsageWindow } from './types';
 
 type Conn = 'connecting' | 'open' | 'closed';
 
@@ -18,6 +18,7 @@ export function useHub() {
   const [streaming, setStreaming] = useState<Record<string, string>>({});
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [toast, setToast] = useState<string | null>(null);
+  const [usage, setUsage] = useState<UsageWindow | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
   const activeRef = useRef<string | null>(null);
@@ -71,6 +72,12 @@ export function useHub() {
           case 'agents': {
             setAgents(msg.agents);
             setStatuses(Object.fromEntries((msg.statuses ?? []).map((s: StatusSnapshot) => [s.agentId, s])));
+            if (msg.usage) setUsage(msg.usage);
+            break;
+          }
+          case 'usage':
+          case 'ratelimit': {
+            if (msg.usage) setUsage(msg.usage);
             break;
           }
           case 'history': {
@@ -160,5 +167,5 @@ export function useHub() {
     [send],
   );
 
-  return { conn, agents, statuses, events, streaming, unread, toast, setToast, selectAgent, refreshAgents, ...api };
+  return { conn, agents, statuses, events, streaming, unread, usage, toast, setToast, selectAgent, refreshAgents, ...api };
 }

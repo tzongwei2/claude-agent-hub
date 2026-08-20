@@ -1,9 +1,10 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import type { Agent, HubEvent, StatusSnapshot } from '@/lib/types';
+import type { Agent, HubEvent, StatusSnapshot, UsageWindow } from '@/lib/types';
 import { STATUS_META } from '@/lib/types';
 import { Avatar, Icon, agoOf, cx } from './ui';
+import { UsageMeter } from './UsageMeter';
 
 interface Props {
   agents: Agent[];
@@ -14,9 +15,11 @@ interface Props {
   onSelect: (id: string) => void;
   onCreate: () => void;
   filter: 'all' | 'running';
+  usage: UsageWindow | null;
+  budget: number | null;
 }
 
-export function Sidebar({ agents, statuses, events, unread, activeId, onSelect, onCreate, filter }: Props) {
+export function Sidebar({ agents, statuses, events, unread, activeId, onSelect, onCreate, filter, usage, budget }: Props) {
   const [query, setQuery] = useState('');
 
   const visible = useMemo(() => {
@@ -117,6 +120,8 @@ export function Sidebar({ agents, statuses, events, unread, activeId, onSelect, 
           );
         })}
       </div>
+
+      <UsageMeter usage={usage} budget={budget} />
     </aside>
   );
 }
