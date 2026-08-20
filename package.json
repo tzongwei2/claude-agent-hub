@@ -1,0 +1,33 @@
+{
+  "name": "claude-agent-hub",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server/index.mjs",
+    "build": "next build",
+    "start": "node server/index.mjs --prod",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "node tests/integration.mjs",
+    "test:concurrent": "node tests/concurrent.mjs",
+    "db": "node scripts/db.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "next": "^15.5.23",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "@types/node": "^22.15.3",
+    "@types/react": "^19.1.9",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "description": "A local Teams-style web UI for multiple independent Claude Code sessions"
+}
