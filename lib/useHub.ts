@@ -18,6 +18,7 @@ export function useHub() {
   const [streaming, setStreaming] = useState<Record<string, string>>({});
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [toast, setToast] = useState<string | null>(null);
+  const [toastTone, setToastTone] = useState<'error' | 'info'>('error');
   const [usage, setUsage] = useState<UsageWindow | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
@@ -87,6 +88,14 @@ export function useHub() {
           }
           case 'event': {
             const ev: HubEvent = msg.event;
+            if (ev.kind === 'cleared') {
+              // Context was cleared: start the pane fresh. The rows survive in
+              // the database; the server simply reads from the marker onward.
+              setEvents((prev) => ({ ...prev, [msg.agentId]: [] }));
+              setStreaming((prev) => ({ ...prev, [msg.agentId]: '' }));
+              setUnread((prev) => ({ ...prev, [msg.agentId]: 0 }));
+              break;
+            }
             setEvents((prev) => {
               const list = prev[msg.agentId] ?? [];
               const idx = list.findIndex((e) => e.id === ev.id);
@@ -121,6 +130,12 @@ export function useHub() {
             break;
           }
           case 'error': {
+            setToastTone('error');
+            setToast(msg.message);
+            break;
+          }
+          case 'notice': {
+            setToastTone('info');
             setToast(msg.message);
             break;
           }
@@ -167,5 +182,5 @@ export function useHub() {
     [send],
   );
 
-  return { conn, agents, statuses, events, streaming, unread, usage, toast, setToast, selectAgent, refreshAgents, ...api };
+  return { conn, agents, statuses, events, streaming, unread, usage, toast, toastTone, setToast, selectAgent, refreshAgents, ...api };
 }

@@ -162,7 +162,7 @@ every connected browser the moment it changes.
 ## Tests
 
 ```
-npm test                      # 18 unit tests, no Claude Code required
+npm test                      # 23 unit tests, no Claude Code required
 node tests/integration.mjs    # real Claude Code session, needs the hub running
 node tests/concurrent.mjs     # two real sessions at once, needs the hub running
 ```

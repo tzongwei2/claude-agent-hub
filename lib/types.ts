@@ -39,7 +39,8 @@ export type EventKind =
   | 'permission'
   | 'system'
   | 'error'
-  | 'result';
+  | 'result'
+  | 'cleared';
 
 export interface HubEvent {
   id: number;

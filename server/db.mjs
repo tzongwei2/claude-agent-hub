@@ -89,6 +89,12 @@ export function openDb(file = DB_PATH) {
     CREATE INDEX IF NOT EXISTS usage_time ON usage(created_at);
   `);
 
+  // Lightweight migration: add columns that older databases predate.
+  const cols = db.prepare('PRAGMA table_info(agents)').all().map((c) => c.name);
+  if (!cols.includes('pending_clear')) {
+    db.exec('ALTER TABLE agents ADD COLUMN pending_clear INTEGER DEFAULT 0');
+  }
+
   return db;
 }
 
@@ -251,8 +257,19 @@ export function createStore(db) {
       db.prepare('UPDATE events SET payload = ? WHERE id = ?').run(JSON.stringify(event), id);
     },
 
+    /**
+     * History the UI should paint: everything after the most recent context
+     * clear. Older rows are left in place - the ring buffer ages them out - so
+     * clearing the chat destroys nothing, it just moves the starting line.
+     */
     listEvents(agentId, limit = 400) {
-      const rows = db.prepare('SELECT * FROM events WHERE agent_id = ? ORDER BY id DESC LIMIT ?').all(agentId, limit);
+      const marker = db
+        .prepare("SELECT id FROM events WHERE agent_id = ? AND kind = 'cleared' ORDER BY id DESC LIMIT 1")
+        .get(agentId);
+      const floor = marker?.id ?? 0;
+      const rows = db
+        .prepare('SELECT * FROM events WHERE agent_id = ? AND id > ? ORDER BY id DESC LIMIT ?')
+        .all(agentId, floor, limit);
       return rows.reverse().map((r) => ({ ...JSON.parse(r.payload), id: r.id, ts: r.created_at }));
     },
 
@@ -317,8 +334,13 @@ export function createStore(db) {
       return db.prepare('DELETE FROM usage WHERE created_at < ?').run(olderThanTs).changes;
     },
 
-    clearEvents(agentId) {
-      db.prepare('DELETE FROM events WHERE agent_id = ?').run(agentId);
+    /**
+     * A clear requested while an agent is stopped must outlive the runner
+     * object AND a hub restart - otherwise the UI hides the history while
+     * Claude quietly resumes with full memory. So it lives in SQLite.
+     */
+    setPendingClear(agentId, pending) {
+      db.prepare('UPDATE agents SET pending_clear = ? WHERE id = ?').run(pending ? 1 : 0, agentId);
     },
   };
 
@@ -337,6 +359,7 @@ function rowToAgent(r) {
     workingDirectory: r.working_directory,
     model: r.model,
     permissionMode: r.permission_mode,
+    pendingClear: Boolean(r.pending_clear),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

@@ -252,10 +252,19 @@ async function handleClientMessage(ws, msg) {
     case 'agents':
       push(ws, { t: 'agents', agents: store.listAgents(), statuses: manager.statuses() });
       return;
-    case 'clear':
-      store.clearEvents(msg.agentId);
-      broadcast({ t: 'history', agentId: msg.agentId, events: [] });
+    case 'clear': {
+      // Runs Claude Code's /clear (free, in-place). Rows are NOT deleted - the
+      // marker moves the UI's starting line; the ring buffer handles growth.
+      const res = manager.clearContext(msg.agentId);
+      if (!res.ok) return push(ws, { t: 'error', message: res.error });
+      // A successful clear is not an error; say so on the informational channel.
+      if (res.deferred) {
+        push(ws, { t: 'notice', message: 'Finishing the current turn, then clearing.' });
+      } else if (res.live === false) {
+        push(ws, { t: 'notice', message: 'Agent is stopped - its context will be cleared when it next starts.' });
+      }
       return;
+    }
     default:
       throw new Error(`Unknown message: ${msg.t}`);
   }
@@ -274,7 +283,14 @@ function broadcast(obj) {
   for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(data);
 }
 
-manager.on('event', ({ agentId, event }) => broadcast({ t: 'event', agentId, event }));
+manager.on('event', ({ agentId, event }) => {
+  broadcast({ t: 'event', agentId, event });
+  if (event.kind === 'cleared') {
+    // Authoritative reset: every client replaces its list with server truth, so
+    // clearing never depends on the client understanding one event kind.
+    broadcast({ t: 'history', agentId, events: store.listEvents(agentId) });
+  }
+});
 manager.on('status', (status) => broadcast({ t: 'status', status }));
 manager.on('delta', ({ agentId, text }) => broadcast({ t: 'delta', agentId, text }));
 manager.on('delta-end', ({ agentId }) => broadcast({ t: 'delta-end', agentId }));

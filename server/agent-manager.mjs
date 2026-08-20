@@ -73,6 +73,11 @@ export class AgentRunner extends EventEmitter {
     this.lastError = null;
     this.currentActivity = null;
     this.rateLimit = null;
+    /** Set when a clear is requested while stopped; applied on next start. */
+    /** Set when a clear must wait for the current turn to finish. */
+    this.clearWhenIdle = false;
+    /** Set only after /clear was actually written to the child. */
+    this.awaitingClear = false;
   }
 
   /* ------------------------------------------------------------------ */
@@ -176,6 +181,14 @@ export class AgentRunner extends EventEmitter {
 
       this.starting = false;
       this.setStatus('idle', null);
+      // A clear requested while stopped is applied before anything else, so a
+      // resumed conversation cannot bring its memory back. performClear()
+      // leaves the durable flag set if the write fails.
+      const fresh = this.store.getAgent(this.agent.id);
+      if (fresh?.pendingClear) {
+        this.agent = fresh;
+        this.performClear();
+      }
       this.flushQueue();
       return { ok: true };
     } catch (err) {
@@ -236,6 +249,57 @@ export class AgentRunner extends EventEmitter {
     for (const text of pending) this.deliver(text);
   }
 
+  /**
+   * Runs Claude Code's own `/clear`: same process, same session id, intercepted
+   * locally by the CLI so it costs zero tokens.
+   *
+   * Three cases, because getting this wrong silently desynchronises the UI from
+   * what the model actually remembers:
+   *   - mid-turn  -> interrupt, then clear once the turn settles
+   *   - idle      -> clear now
+   *   - stopped   -> persist the intent in SQLite and apply it on next start
+   */
+  clearContext() {
+    if (this.child) {
+      const busy = ['running', 'starting', 'waiting_for_permission'].includes(this.status);
+      if (busy) {
+        // Do not write the marker yet: the in-flight turn is still emitting
+        // events, and they would repopulate a pane we had just emptied.
+        this.clearWhenIdle = true;
+        this.interrupt();
+        return { ok: true, deferred: true };
+      }
+      return this.performClear();
+    }
+
+    // Stopped: durable, so Restart and hub restarts cannot lose it.
+    this.store.setPendingClear(this.agent.id, true);
+    this.agent = { ...this.agent, pendingClear: true };
+    this.record({ kind: 'cleared', text: 'Context cleared' });
+    return { ok: true, live: false };
+  }
+
+  /** Writes /clear and only then records the marker. */
+  performClear() {
+    const written = this.write({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/clear' }] },
+    });
+    if (!written) {
+      // The command never reached the CLI - do NOT hide history, or the UI
+      // would claim a clear that did not happen.
+      this.record({ kind: 'error', text: 'Could not clear the context - Claude Code is not accepting input.' });
+      return { ok: false, error: 'Claude Code is not accepting input.' };
+    }
+    // The CLI answers /clear with an empty result turn; that is bookkeeping,
+    // not conversation, so it should not appear in a freshly cleared pane.
+    this.awaitingClear = true;
+    this.store.setPendingClear(this.agent.id, false);
+    this.agent = { ...this.agent, pendingClear: false };
+    this.record({ kind: 'cleared', text: 'Context cleared' });
+    return { ok: true, live: true };
+  }
+
   interrupt() {
     if (!this.child) return;
     this.write({ type: 'control_request', request_id: `int-${randomUUID()}`, request: { subtype: 'interrupt' } });
@@ -246,6 +310,8 @@ export class AgentRunner extends EventEmitter {
     for (const id of [...this.pendingPermissions.keys()]) {
       this.resolvePermission(id, 'deny', 'Agent stopped by the user.');
     }
+    this.awaitingClear = false;
+    this.clearWhenIdle = false;
     if (this.child) {
       const child = this.child;
       this.child = null;
@@ -268,6 +334,9 @@ export class AgentRunner extends EventEmitter {
   onExit(code, signal) {
     const wasStopped = this.child === null && this.status === 'stopped';
     this.child = null;
+    // Never let clear bookkeeping outlive the process it belonged to.
+    this.awaitingClear = false;
+    this.clearWhenIdle = false;
     for (const id of [...this.pendingPermissions.keys()]) {
       this.resolvePermission(id, 'deny', 'Claude Code exited.');
     }
@@ -424,15 +493,22 @@ export class AgentRunner extends EventEmitter {
     const tokens =
       (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
 
-    this.record({
-      kind: 'result',
-      isError: Boolean(msg.is_error),
-      subtype: msg.subtype,
-      durationMs: msg.duration_ms ?? msg.duration_api_ms ?? null,
-      costUsd: msg.total_cost_usd ?? null,
-      turns: msg.num_turns ?? null,
-      tokens,
-    });
+    // Only the /clear turn is swallowed: it is the one we are waiting for AND
+    // it consumes no tokens. A real turn is never silently dropped.
+    const isClearReceipt = this.awaitingClear && tokens === 0;
+    if (isClearReceipt) {
+      this.awaitingClear = false;
+    } else {
+      this.record({
+        kind: 'result',
+        isError: Boolean(msg.is_error),
+        subtype: msg.subtype,
+        durationMs: msg.duration_ms ?? msg.duration_api_ms ?? null,
+        costUsd: msg.total_cost_usd ?? null,
+        turns: msg.num_turns ?? null,
+        tokens,
+      });
+    }
 
     // The trip meter: one small row per completed turn.
     this.store.recordUsage(this.agent.id, this.sessionId, usage, msg.total_cost_usd ?? 0);
@@ -453,7 +529,18 @@ export class AgentRunner extends EventEmitter {
       this.emit('notify', { agentId: this.agent.id, reason: 'rate_limit' });
     }
     this.setStatus(this.pendingPermissions.size ? 'waiting_for_permission' : 'idle', null);
-    this.emit('notify', { agentId: this.agent.id, reason: msg.is_error ? 'error' : 'done' });
+
+    // A clear receipt is not a finished task: notifying would re-raise the
+    // unread badge we just cleared.
+    if (!isClearReceipt) {
+      this.emit('notify', { agentId: this.agent.id, reason: msg.is_error ? 'error' : 'done' });
+    }
+
+    // A clear that waited for this turn can now run.
+    if (this.clearWhenIdle) {
+      this.clearWhenIdle = false;
+      this.performClear();
+    }
   }
 
   /* -------------------------- permissions --------------------------- */
@@ -614,6 +701,13 @@ export class AgentManager extends EventEmitter {
 
   interrupt(agentId) {
     this.runners.get(agentId)?.interrupt();
+  }
+
+  /** Clear an agent's context via Claude Code's own /clear. */
+  clearContext(agentId) {
+    const runner = this.runner(agentId);
+    if (!runner) return { ok: false, error: 'Unknown agent' };
+    return runner.clearContext();
   }
 
   async shutdown() {

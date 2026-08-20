@@ -278,3 +278,82 @@ test('maintain() brings an existing database into policy', () => {
   assert.equal(result.removed, 500);
   assert.equal(store.db.prepare('SELECT COUNT(*) c FROM events').get().c, RETENTION.eventsPerAgent);
 });
+
+/* --------------------------- clear semantics ---------------------------- */
+
+test('a clear requested while stopped survives a runner replacement', () => {
+  const store = tempStore();
+  const agent = store.createAgent(agentInput());
+  const manager = new AgentManager(store);
+  const runner = manager.runner(agent.id);
+
+  const res = runner.clearContext();
+  assert.equal(res.live, false);
+  assert.equal(store.getAgent(agent.id).pendingClear, true, 'the intent is durable');
+
+  // Restart drops the runner; a fresh one must still know a clear is owed.
+  manager.runners.delete(agent.id);
+  assert.equal(store.getAgent(agent.id).pendingClear, true);
+});
+
+test('a failed write never hides history', () => {
+  const { runner, store, agent } = fakeRunner();
+  runner.child.stdin.writable = false; // CLI died, exit not yet fired
+  const res = runner.performClear();
+  assert.equal(res.ok, false);
+  const kinds = store.listEvents(agent.id).map((e) => e.kind);
+  assert.ok(!kinds.includes('cleared'), 'no marker written');
+  assert.ok(kinds.includes('error'), 'the failure is surfaced');
+  assert.equal(store.getAgent(agent.id).pendingClear, false);
+});
+
+test('clearing mid-turn waits instead of suppressing the real result', () => {
+  const { runner, store, agent, written } = fakeRunner();
+  runner.status = 'running';
+
+  const res = runner.clearContext();
+  assert.equal(res.deferred, true);
+  assert.ok(!store.listEvents(agent.id).some((e) => e.kind === 'cleared'), 'marker deferred');
+  assert.equal(written.at(-1).request.subtype, 'interrupt');
+
+  // The in-flight turn lands: its result must be recorded, not swallowed.
+  // Query raw rows - listEvents deliberately hides anything before the marker.
+  const rows = () =>
+    store.db
+      .prepare('SELECT payload FROM events WHERE agent_id = ?')
+      .all(agent.id)
+      .map((r) => JSON.parse(r.payload));
+
+  runner.onStdout(JSON.stringify({ type: 'result', subtype: 'success', usage: { output_tokens: 500 } }) + '\n');
+  const result = rows().find((e) => e.kind === 'result');
+  assert.ok(result, 'the real result survived');
+  assert.equal(result.tokens, 500);
+  assert.ok(rows().some((e) => e.kind === 'cleared'), 'the clear then ran');
+  assert.equal(store.listEvents(agent.id).length, 0, 'but the pane is empty');
+
+  // ...and the /clear receipt (zero tokens) is the one swallowed.
+  runner.onStdout(JSON.stringify({ type: 'result', subtype: 'success', usage: {} }) + '\n');
+  assert.equal(rows().filter((e) => e.kind === 'result').length, 1, 'only the real result was kept');
+});
+
+test('clear bookkeeping never leaks into a later turn', async () => {
+  const { runner, store, agent } = fakeRunner();
+  runner.performClear();
+  assert.equal(runner.awaitingClear, true);
+
+  await runner.stop(); // no result ever arrives
+  assert.equal(runner.awaitingClear, false, 'flag reset on stop');
+
+  runner.child = { killed: false, stdin: { writable: true, write() {}, end() {} }, kill() {} };
+  runner.onStdout(JSON.stringify({ type: 'result', subtype: 'success', usage: { output_tokens: 42 } }) + '\n');
+  assert.ok(store.listEvents(agent.id).some((e) => e.kind === 'result' && e.tokens === 42), 'later turn recorded');
+});
+
+test('the clear receipt does not raise an unread badge', () => {
+  const { runner } = fakeRunner();
+  const notifies = [];
+  runner.on('notify', (n) => notifies.push(n));
+  runner.performClear();
+  runner.onStdout(JSON.stringify({ type: 'result', subtype: 'success', usage: {} }) + '\n');
+  assert.equal(notifies.length, 0, 'no phantom "done" notification');
+});

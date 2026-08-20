@@ -60,6 +60,28 @@ Working, verified against a live Claude Code session:
 - SQLite persistence with a bounded ring buffer
 - Usage visibility: warning light, hard stop, trip meter (below)
 
+## Clearing context
+
+The Clear button runs Claude Code's own `/clear` down the same stdin channel as
+your messages. The CLI intercepts it locally, so it costs **zero tokens**, keeps
+the same process and the same session id.
+
+Nothing is deleted. A `cleared` marker row is written and `listEvents` reads
+from the most recent marker onward, so the pane empties while history stays on
+disk and ages out through the ring buffer.
+
+Three cases, because getting this wrong desynchronises the UI from what the
+model actually remembers:
+
+| Agent state | Behaviour |
+| --- | --- |
+| Idle | Clears immediately |
+| Mid-turn | Interrupts, then clears once the turn settles |
+| Stopped | Persists the intent in SQLite; applied on next start |
+
+`/clear` does **not** erase anything written to disk — files, `CLAUDE.md`, or
+memory notes survive it.
+
 ## Usage visibility
 
 Three mechanisms, all built from data Claude Code already reports on every turn.
@@ -132,8 +154,6 @@ Notes for whoever does this:
 ### 3. Smaller things
 
 - Settings UI for the token budget instead of hand-setting `localStorage`
-- Distinguish "new session" (context reset) from "clear transcript" — today's
-  Clear only empties the UI transcript while the agent keeps its memory
 - Session dividers in the chat when a new Claude session begins
 - Per-agent MCP configuration
 - Desktop notifications for permission prompts
