@@ -18,6 +18,7 @@ export interface Agent {
   workingDirectory: string;
   model: string;
   permissionMode: string;
+  engine: 'claude' | 'copilot';
   createdAt: number;
   updatedAt: number;
 }

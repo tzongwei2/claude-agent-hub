@@ -7,6 +7,7 @@ import { WebSocketServer } from 'ws';
 import { openDb, createStore, RETENTION, DB_PATH } from './db.mjs';
 import { AgentManager } from './agent-manager.mjs';
 import { claudeVersion, resolveClaudeCli } from './claude-cli.mjs';
+import { copilotVersion, resolveCopilotCli } from './copilot-cli.mjs';
 
 /**
  * Single-process local server:
@@ -44,9 +45,11 @@ await app.prepare();
 const routes = [
   ['GET', /^\/api\/health$/, async () => {
     const cli = resolveClaudeCli();
+    const copilot = resolveCopilotCli();
     return {
       ok: true,
       claude: { found: Boolean(cli), source: cli?.source ?? null, version: claudeVersion() },
+      copilot: { found: Boolean(copilot), source: copilot?.source ?? null, version: copilotVersion() },
       platform: process.platform,
     };
   }],
@@ -150,6 +153,7 @@ function validateAgent(body) {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return `Working directory does not exist: ${dir}`;
   const modes = ['manual', 'acceptEdits', 'plan', 'auto'];
   if (body.permissionMode && !modes.includes(body.permissionMode)) return 'Invalid permission mode';
+  if (body.engine && !['claude', 'copilot'].includes(body.engine)) return 'Invalid engine';
   return null;
 }
 
@@ -303,8 +307,10 @@ manager.on('ratelimit', ({ info }) => broadcast({ t: 'ratelimit', info, usage: m
 
 server.listen(PORT, HOST, () => {
   const cli = resolveClaudeCli();
+  const copilot = resolveCopilotCli();
   console.log(`\n  Claude Agent Hub  ->  http://localhost:${PORT}`);
   console.log(`  Claude Code CLI   ->  ${cli ? `${cli.source} (${claudeVersion() ?? 'unknown version'})` : 'NOT FOUND'}`);
+  console.log(`  Copilot CLI       ->  ${copilot ? `${copilot.source} (${copilotVersion() ?? 'unknown version'})` : 'not found (optional)'}`);
   console.log(`  Database          ->  ${DB_PATH}`);
   console.log(
     `  Retention         ->  ${RETENTION.eventsPerAgent || 'unlimited'} events/agent` +

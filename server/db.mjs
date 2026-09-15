@@ -48,6 +48,7 @@ export function openDb(file = DB_PATH) {
       working_directory TEXT NOT NULL,
       model TEXT DEFAULT '',
       permission_mode TEXT DEFAULT 'manual',
+      engine TEXT DEFAULT 'claude',
       sort_order INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -94,6 +95,9 @@ export function openDb(file = DB_PATH) {
   if (!cols.includes('pending_clear')) {
     db.exec('ALTER TABLE agents ADD COLUMN pending_clear INTEGER DEFAULT 0');
   }
+  if (!cols.includes('engine')) {
+    db.exec("ALTER TABLE agents ADD COLUMN engine TEXT DEFAULT 'claude'");
+  }
 
   return db;
 }
@@ -119,8 +123,8 @@ export function createStore(db) {
       const id = randomUUID();
       const ts = now();
       db.prepare(`INSERT INTO agents
-        (id,name,description,emoji,accent,system_prompt,agent_key,working_directory,model,permission_mode,sort_order,created_at,updated_at)
-        VALUES (@id,@name,@description,@emoji,@accent,@system_prompt,@agent_key,@working_directory,@model,@permission_mode,@sort_order,@created_at,@updated_at)`)
+        (id,name,description,emoji,accent,system_prompt,agent_key,working_directory,model,permission_mode,engine,sort_order,created_at,updated_at)
+        VALUES (@id,@name,@description,@emoji,@accent,@system_prompt,@agent_key,@working_directory,@model,@permission_mode,@engine,@sort_order,@created_at,@updated_at)`)
         .run({
           id,
           name: input.name,
@@ -132,6 +136,7 @@ export function createStore(db) {
           working_directory: input.workingDirectory,
           model: input.model ?? '',
           permission_mode: input.permissionMode ?? 'manual',
+          engine: input.engine === 'copilot' ? 'copilot' : 'claude',
           sort_order: db.prepare('SELECT COUNT(*) c FROM agents').get().c,
           created_at: ts,
           updated_at: ts,
@@ -146,7 +151,7 @@ export function createStore(db) {
       db.prepare(`UPDATE agents SET
         name=@name, description=@description, emoji=@emoji, accent=@accent,
         system_prompt=@system_prompt, agent_key=@agent_key, working_directory=@working_directory,
-        model=@model, permission_mode=@permission_mode, updated_at=@updated_at WHERE id=@id`)
+        model=@model, permission_mode=@permission_mode, engine=@engine, updated_at=@updated_at WHERE id=@id`)
         .run({
           id,
           name: merged.name,
@@ -158,6 +163,7 @@ export function createStore(db) {
           working_directory: merged.workingDirectory,
           model: merged.model ?? '',
           permission_mode: merged.permissionMode ?? 'manual',
+          engine: merged.engine === 'copilot' ? 'copilot' : 'claude',
           updated_at: now(),
         });
       return store.getAgent(id);
@@ -359,6 +365,7 @@ function rowToAgent(r) {
     workingDirectory: r.working_directory,
     model: r.model,
     permissionMode: r.permission_mode,
+    engine: r.engine === 'copilot' ? 'copilot' : 'claude',
     pendingClear: Boolean(r.pending_clear),
     createdAt: r.created_at,
     updatedAt: r.updated_at,

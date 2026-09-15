@@ -11,17 +11,32 @@ interface Props {
   onDeleted: () => void;
 }
 
-const MODELS = [
-  { value: '', label: 'Default (Claude Code setting)' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'sonnet', label: 'Sonnet' },
-  { value: 'haiku', label: 'Haiku' },
+const ENGINES = [
+  { value: 'claude', label: 'Claude Code' },
+  { value: 'copilot', label: 'GitHub Copilot CLI' },
 ];
+
+const MODELS: Record<string, { value: string; label: string }[]> = {
+  claude: [
+    { value: '', label: 'Default (Claude Code setting)' },
+    { value: 'opus', label: 'Opus' },
+    { value: 'sonnet', label: 'Sonnet' },
+    { value: 'haiku', label: 'Haiku' },
+  ],
+  copilot: [
+    { value: '', label: 'Auto (Copilot picks)' },
+    { value: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+    { value: 'claude-opus-5', label: 'Claude Opus 5' },
+    { value: 'claude-haiku-4.5', label: 'Claude Haiku 4.5' },
+    { value: 'gpt-5.5', label: 'GPT-5.5' },
+  ],
+};
 
 const MODES = [
   { value: 'manual', label: 'Ask me every time (recommended)' },
   { value: 'acceptEdits', label: 'Auto-accept file edits' },
   { value: 'plan', label: 'Plan mode (read-only)' },
+  { value: 'auto', label: 'Full auto — no prompts at all (use with caution)' },
 ];
 
 export function AgentDialog({ agent, onClose, onSaved, onDeleted }: Props) {
@@ -34,6 +49,7 @@ export function AgentDialog({ agent, onClose, onSaved, onDeleted }: Props) {
     agentKey: agent?.agentKey ?? '',
     model: agent?.model ?? '',
     permissionMode: agent?.permissionMode ?? 'manual',
+    engine: agent?.engine ?? 'claude',
   });
   const [error, setError] = useState<string | null>(null);
   const [pathState, setPathState] = useState<'unknown' | 'ok' | 'bad'>('unknown');
@@ -152,7 +168,28 @@ export function AgentDialog({ agent, onClose, onSaved, onDeleted }: Props) {
             />
           </Field>
 
-          <Field label="Working directory" hint="Claude Code launches with this as its cwd. Must already exist.">
+          <Field label="Engine" hint="Which CLI this agent talks to. Cannot be changed after messages have been sent.">
+            <select
+              className={inputClass}
+              value={form.engine}
+              disabled={Boolean(agent)}
+              onChange={(e) => {
+                const engine = e.target.value as 'claude' | 'copilot';
+                setForm((f) => ({ ...f, engine, model: '' }));
+              }}
+            >
+              {ENGINES.map((e) => (
+                <option key={e.value} value={e.value}>
+                  {e.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field
+            label="Working directory"
+            hint={`${form.engine === 'copilot' ? 'Copilot CLI' : 'Claude Code'} launches with this as its cwd. Must already exist.`}
+          >
             <div className="relative">
               <input
                 className={cx(inputClass, 'pr-24 font-mono text-[13px]')}
@@ -169,7 +206,11 @@ export function AgentDialog({ agent, onClose, onSaved, onDeleted }: Props) {
 
           <Field
             label="Role / system prompt"
-            hint="Appended to Claude Code's own system prompt (--append-system-prompt)."
+            hint={
+              form.engine === 'copilot'
+                ? 'Sent as standing instructions in a priming turn before your first message (Copilot has no --append-system-prompt equivalent).'
+                : "Appended to Claude Code's own system prompt (--append-system-prompt)."
+            }
           >
             <textarea
               className={cx(inputClass, 'min-h-[90px] resize-y')}
@@ -182,14 +223,21 @@ export function AgentDialog({ agent, onClose, onSaved, onDeleted }: Props) {
           <div className="grid grid-cols-2 gap-4">
             <Field label="Model">
               <select className={inputClass} value={form.model} onChange={(e) => set('model', e.target.value)}>
-                {MODELS.map((m) => (
+                {MODELS[form.engine].map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.label}
                   </option>
                 ))}
               </select>
             </Field>
-            <Field label="Native agent" hint="Uses Claude Code's own --agent definition.">
+            <Field
+              label="Native agent"
+              hint={
+                form.engine === 'copilot'
+                  ? "Uses Copilot's own --agent definition (.github/agents)."
+                  : "Uses Claude Code's own --agent definition."
+              }
+            >
               <input
                 className={inputClass}
                 value={form.agentKey}
@@ -199,7 +247,10 @@ export function AgentDialog({ agent, onClose, onSaved, onDeleted }: Props) {
             </Field>
           </div>
 
-          <Field label="Permissions">
+          <Field
+            label="Permissions"
+            hint={form.permissionMode === 'auto' ? 'The agent can run any command or edit any file without asking. Only pick this for a working directory you fully trust.' : undefined}
+          >
             <select
               className={inputClass}
               value={form.permissionMode}

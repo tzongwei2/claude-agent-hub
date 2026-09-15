@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { resolveClaudeCli } from './claude-cli.mjs';
+import { CopilotAgentRunner } from './copilot-runner.mjs';
 import { RETENTION } from './db.mjs';
 
 /**
@@ -47,7 +48,7 @@ import { RETENTION } from './db.mjs';
  * ============================================================================
  */
 
-const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+export const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Rate-limit window lengths, used to compute the rolling usage total. */
 export const WINDOW_MS = {
@@ -139,7 +140,7 @@ export class AgentRunner extends EventEmitter {
         '--verbose',
         '--include-partial-messages',
         '--permission-prompt-tool', 'stdio',
-        '--permission-mode', this.agent.permissionMode || 'manual',
+        '--permission-mode', claudePermissionMode(this.agent.permissionMode),
       ];
       if (resumeId) args.push('--resume', resumeId);
       else args.push('--session-id', sessionUuid);
@@ -638,7 +639,7 @@ export class AgentManager extends EventEmitter {
     if (existing) return existing;
     const agent = this.store.getAgent(agentId);
     if (!agent) return null;
-    const runner = new AgentRunner(agent, this.store);
+    const runner = agent.engine === 'copilot' ? new CopilotAgentRunner(agent, this.store) : new AgentRunner(agent, this.store);
     runner.on('event', (e) => this.emit('event', { agentId, event: e }));
     runner.on('status', (s) => this.emit('status', s));
     runner.on('delta', (d) => this.emit('delta', d));
@@ -719,13 +720,13 @@ export class AgentManager extends EventEmitter {
 
 /** Stored tool output is a preview: the UI shows a summary, and Claude Code
  *  keeps the full text in its own transcript. */
-function truncate(text, max) {
+export function truncate(text, max) {
   const s = String(text ?? '');
   return s.length > max ? `${s.slice(0, max)}
 ... (truncated, ${s.length - max} more chars)` : s;
 }
 
-function firstLine(s, max = 160) {
+export function firstLine(s, max = 160) {
   const line = String(s ?? '').split('\n')[0].trim();
   return line.length > max ? line.slice(0, max) + '...' : line;
 }
@@ -734,6 +735,16 @@ function shortPath(p) {
   if (!p) return '';
   const parts = String(p).replace(/\\/g, '/').split('/');
   return parts.slice(-2).join('/');
+}
+
+/**
+ * Our 'auto' permission mode means "never prompt, allow everything" - Claude
+ * Code's own mode of that name is not documented as a full bypass, so we map
+ * it to the mode that is: `bypassPermissions` (formerly
+ * `--dangerously-skip-permissions`). Every other mode passes straight through.
+ */
+function claudePermissionMode(mode) {
+  return mode === 'auto' ? 'bypassPermissions' : mode || 'manual';
 }
 
 /** Turns a raw tool call into something worth showing a human. */
@@ -768,7 +779,7 @@ export function summariseTool(name, input = {}) {
   }
 }
 
-function safeInput(input) {
+export function safeInput(input) {
   try {
     const json = JSON.stringify(input ?? {}, null, 2);
     return json.length > 4000 ? json.slice(0, 4000) + '\n...' : json;
@@ -785,7 +796,7 @@ function flattenContent(content) {
   return content ? String(content) : '';
 }
 
-function resultSummary(text, isError) {
+export function resultSummary(text, isError) {
   const clean = String(text ?? '').trim();
   if (!clean) return isError ? 'Failed' : 'Done';
   const lines = clean.split('\n').filter(Boolean);
